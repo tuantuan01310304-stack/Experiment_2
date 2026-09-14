@@ -1,0 +1,45 @@
+# 定点抓取任务参数。仿真/真机共用同一套任务逻辑，切真机只改这里和设备参数。
+grasp_task:
+  ros__parameters:
+    use_sim_time: true
+
+    # 机械臂底座在世界坐标系的位姿（launch 里生成机器人的位置，须一致）
+    base_pose_xyz: [0.0, 0.0, 0.75]
+
+    # 取物点 A / 放置点 B（世界坐标，物体中心）。A 必须与 world 文件里
+    # target_object 的初始位姿一致。B 在桌面另一侧的放置区。
+    # 注意：mechArm 270 臂展小，垂直抓取姿态下可达半径约 0.13-0.15m，
+    # A/B 不要放太远（IK 可达性已用 tools 脚本扫描验证过）
+    point_a: [0.12, 0.08, 0.7635]
+    point_b: [0.12, -0.08, 0.7635]
+
+    # 安全高度：取放过程中工具中心离桌面的抬升高度（m）
+    safe_height: 0.05
+
+    # 工具参数：夹持中心相对 gripper_base 原点沿接近轴的距离（m）。
+    # 官方夹爪：指垫碰撞盒中心 y = 链节 0.021 + 盒偏移 0.042 = 0.063
+    tool_tip_offset: 0.063
+
+    # 夹爪开/合角度（官方 adaptive gripper，rad）。
+    # open=0.0 与全闭 -0.50 取自 automaticaddison 的 SRDF；25mm 方块
+    # 的有效夹持角经仿真实测为 -0.44（-0.34 是他给更粗目标物用的）
+    gripper_open: 0.0
+    gripper_close: -0.44
+
+    # 运动节奏（s）：单段轨迹时长与夹爪动作时长
+    move_duration: 2.5
+    grip_duration: 1.2
+
+    # 连续抓取次数（验收：5 次至少成功 4 次）
+    cycles: 5
+
+    # 日志输出目录（轨迹 CSV / 结果 / 错误日志），~ 会展开为用户主目录
+    log_dir: "~/mecharm_ws/grasp_logs"
+
+    # Gazebo 世界名（吸附搬运用 set_pose 服务需要）
+    world_name: "grasp_world"
+
+    # 吸附开关：已弃用纯吸附方案，改为真实物理抓取（接触+摩擦），保持 false。
+    sim_attach: false
+    # 仿真结果判定/复位用 Gazebo 位姿真值；真机上改 false
+    sim_check: true

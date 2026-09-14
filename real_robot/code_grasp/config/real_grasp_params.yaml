@@ -1,0 +1,47 @@
+# 真机（Jetson + mechArm 270）定点抓取参数。
+# 与仿真共用同一任务节点，验收要求：切真机只改设备、通信和位置参数。
+grasp_task:
+  ros__parameters:
+    use_sim_time: false
+
+    # 真机以机械臂底座为原点（桌面即 z=0 平面装底座的话，A/B 的 z
+    # 就是物体夹持中心离底座安装面的高度）
+    base_pose_xyz: [0.0, 0.0, 0.0]
+
+    # 取物点 A / 放置点 B：用尺子量实际桌面标记点相对底座中心的位置（m）。
+    # 注意可达性：mechArm 270 垂直抓取半径 ≤0.15m 左右，别放太远。
+    # 25mm 方块放桌面时中心高度约 0.0135（含底座安装面与桌面的差在此修正）
+    point_a: [0.12, 0.08, 0.0135]
+    point_b: [0.12, -0.08, 0.0135]
+
+    safe_height: 0.05
+    tool_tip_offset: 0.055
+
+    # 夹爪开合角（rad），与驱动端 gripper_*_value 两点标定对应
+    gripper_open: 0.1
+    gripper_close: -0.25
+
+    # 真机放慢节奏：单段轨迹 4s、夹爪 2s（配合驱动 max_speed 低速模式）
+    move_duration: 4.0
+    grip_duration: 2.0
+
+    cycles: 5
+    log_dir: "/home/nvidia/ros2_ws/grasp_logs_real"
+
+    # 真机关键开关：吸附逻辑整体停用，成功与否由现场人工记录
+    sim_attach: false
+
+mecharm_real_driver:
+  ros__parameters:
+    port: ""            # 留空自动找 /dev/ttyACM* 或 /dev/ttyUSB*
+    baud: 115200
+    max_speed: 30       # 初次运行低速模式；验收稳定后可放宽
+    state_rate: 10.0
+    # 首次联机标定：若某关节方向与仿真相反，把对应 sign 改成 -1
+    joint_signs: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    joint_offsets_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # 夹爪两点标定（rad <-> pymycobot 开度 0-100）
+    gripper_open_rad: 0.1
+    gripper_open_value: 95
+    gripper_close_rad: -0.25
+    gripper_close_value: 25

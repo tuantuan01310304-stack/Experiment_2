@@ -1,0 +1,104 @@
+===== 异常测试：关节目标超限 =====
+===== BEFORE =====
+header:
+  stamp:
+    sec: 1789289190
+    nanosec: 941564582
+  frame_id: ''
+name:
+- joint1_to_base
+- joint2_to_joint1
+- joint3_to_joint2
+- joint4_to_joint3
+- joint5_to_joint4
+- joint6_to_joint5
+- gripper_controller
+position:
+- 0.12566370614359174
+- 0.6702064327658225
+- 0.2822197400474831
+- -0.044331363000655974
+- 0.998502865065956
+- -0.06283185307179587
+- 0.0
+velocity: []
+effort: []
+---
+===== SEND INVALID GOAL =====
+Waiting for an action server to become available...
+Sending goal:
+     trajectory:
+  header:
+    stamp:
+      sec: 0
+      nanosec: 0
+    frame_id: ''
+  joint_names:
+  - joint1_to_base
+  - joint2_to_joint1
+  - joint3_to_joint2
+  - joint4_to_joint3
+  - joint5_to_joint4
+  - joint6_to_joint5
+  points:
+  - positions:
+    - 2.9670597284
+    - 0.6702064328
+    - 0.28221974
+    - -0.044331363
+    - 0.9985028651
+    - -0.0628318531
+    velocities: []
+    accelerations: []
+    effort: []
+    time_from_start:
+      sec: 5
+      nanosec: 0
+multi_dof_trajectory:
+  header:
+    stamp:
+      sec: 0
+      nanosec: 0
+    frame_id: ''
+  joint_names: []
+  points: []
+path_tolerance: []
+component_path_tolerance: []
+goal_tolerance: []
+component_goal_tolerance: []
+goal_time_tolerance:
+  sec: 0
+  nanosec: 0
+
+Goal accepted with ID: 223e03b5fb174dfcab36389bacaf66f9
+
+Result:
+    error_code: -5
+error_string: 关节 joint1_to_base 目标 2.967 超 URDF 限位
+
+Goal finished with status: ABORTED
+===== AFTER =====
+header:
+  stamp:
+    sec: 1789289193
+    nanosec: 936350066
+  frame_id: ''
+name:
+- joint1_to_base
+- joint2_to_joint1
+- joint3_to_joint2
+- joint4_to_joint3
+- joint5_to_joint4
+- joint6_to_joint5
+- gripper_controller
+position:
+- 0.12566370614359174
+- 0.6702064327658225
+- 0.2822197400474831
+- -0.044331363000655974
+- 0.998502865065956
+- -0.06283185307179587
+- 0.0
+velocity: []
+effort: []
+---
