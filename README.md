@@ -232,7 +232,7 @@ The real robot is controlled through the ROS 2 driver running on the Jetson plat
 
 The following screenshot shows the driver successfully entering the ready state.
 
-![Real Robot Driver](real_robot/screenshots/01_driver_ready.png)
+![Real Robot Driver](real_robot/screenshots/02_driver_started.png)
 
 The driver communicates with the mechArm270 and provides the ROS 2 interface required by the grasping task.
 
@@ -265,7 +265,7 @@ A → B → A → B → A → B
 
 The following terminal output shows the continuous ROS 2 execution process.
 
-![Continuous Transfer](real_robot/screenshots/02_continuous_transfer.png)
+![Continuous Transfer](real_robot/screenshots/01_real_robot_execution.jpg)
 
 The continuous transfer sequence completed successfully, demonstrating that the robot could repeatedly execute the predefined joint trajectories.
 
