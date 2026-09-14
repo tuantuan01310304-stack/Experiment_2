@@ -11,448 +11,398 @@ The experiment was completed in two stages:
 
 The complete manipulation workflow is:
 
-**Home → Move above Point A → Descend → Close gripper → Lift → Move to Point B → Release → Return Home**
+**Home → Move above Point A → Descend → Close Gripper → Lift → Move to Point B → Release → Return Home**
 
 The task uses predefined pick-and-place positions and does not rely on visual localization.
 
-The project verifies not only successful fixed-point grasping, but also repeated execution, trajectory recording, ROS 2 joint-state feedback, and safety handling for abnormal or unreachable commands.
+The experiment verifies fixed-point grasping, repeated execution, trajectory recording, ROS 2 joint-state feedback, and safety handling for abnormal or unreachable commands.
 
 ---
 
-## 2. System Architecture
+## 2. Repository Structure
 
-The experiment uses ROS 2 as the common control framework for both simulation and real-robot execution.
-
-```text
-                    ROS 2 Task Node
-                           │
-                           ▼
-              FollowJointTrajectory
-                           │
-             ┌─────────────┴─────────────┐
-             │                           │
-             ▼                           ▼
-      Simulation Backend          Real-Robot Backend
-      Gazebo / ros2_control       mecharm_real driver
-             │                           │
-             ▼                           ▼
-      Simulated mechArm270        Jetson Orin
-                                         │
-                                         ▼
-                                   mechArm270 Robot
-```
-
-The simulation stage is used to verify the motion sequence, target positions, trajectory execution, and exception handling before operating the physical robot.
-
-For the real-robot stage, the ROS 2 trajectory-control architecture is retained while the hardware communication backend and workspace parameters are changed for the physical mechArm270.
-
----
-
-## 3. Simulation
-
-### 3.1 Simulation Environment
-
-The simulation environment contains:
-
-- mechArm270 robotic arm
-- Adaptive gripper
-- Work table
-- Target object
-- Fixed pick point A
-- Fixed place point B
-- Safe approach height
-
-The environment was built using **Ubuntu 22.04**, **ROS 2 Humble**, **Gazebo / Ignition**, **MoveIt 2**, and **ros2_control**.
-
-### Simulation Scene
-
-![Gazebo Simulation Environment](screenshots/simulation_scene.png)
-
-*Figure 1. Gazebo simulation environment for the mechArm270 fixed-point grasping task.*
-
-### Gazebo Model and Scene Setup
-
-![Gazebo Scene Setup](screenshots/gazebo_scene_setup.png)
-
-*Figure 2. Gazebo scene containing the mechArm270, table, target object, and simulation environment.*
-
----
-
-## 4. Fixed-Point Pick-and-Place Configuration
-
-The grasping task uses predefined target positions rather than visual localization.
-
-The main simulation parameters include:
-
-- **Point A:** object pick position
-- **Point B:** object placement position
-- **Safe height:** intermediate height used to reduce collision risk
-- **Arm movement time:** trajectory execution duration
-- **Gripper movement time:** gripper opening / closing duration
-- **Repeat count:** 5
-
-### Task Parameters
-
-![Fixed Point Parameters](screenshots/fixed_point_parameters.png)
-
-*Figure 3. Fixed-point grasping parameters including Point A, Point B, safe height, motion time, and repeat count.*
-
-The basic motion sequence is:
-
-```text
-HOME
-  ↓
-Move above Point A
-  ↓
-Descend to Point A
-  ↓
-Close gripper
-  ↓
-Lift to safe height
-  ↓
-Move toward Point B
-  ↓
-Descend to Point B
-  ↓
-Open gripper
-  ↓
-Return HOME
-```
-
-Using an intermediate safe height prevents the end effector and the grasped object from moving directly through the work surface during horizontal transfer.
-
----
-
-## 5. Simulation Validation
-
-The simulation task was executed repeatedly to verify the stability of the fixed-point grasping workflow.
-
-Five consecutive grasping cycles were recorded.
-
-### Five-Run Simulation Test
-
-![Five Run Simulation Result](screenshots/simulation_five_runs.png)
-
-*Figure 4. Five-run simulation validation result.*
-
-The recorded summary shows:
-
-```text
-Cycle 1: Success
-Cycle 2: Success
-Cycle 3: Success
-Cycle 4: Success
-Cycle 5: Success
-
-Completed: 5 / 5
-```
-
-Therefore, the simulation achieved a **100% completion rate in the recorded five-run validation**.
-
-Trajectory data were also recorded during execution for subsequent analysis and verification.
-
----
-
-## 6. Simulation Exception Handling
-
-In addition to normal grasping execution, abnormal conditions were tested to verify that unsafe or invalid commands would not cause uncontrolled motion.
-
-The tested abnormal conditions included:
-
-- Communication / trajectory target timeout
-- Invalid or unavailable joint solution
-- Unreachable target position
-- Trajectory execution timeout
-
-When an invalid target was detected, the task was rejected or stopped and an error message was recorded.
-
-### Exception Test Record
-
-![Simulation Exception Test](screenshots/simulation_exception_test.png)
-
-*Figure 5. Simulation exception and safety-handling records.*
-
-This mechanism prevents the robot from blindly executing an invalid trajectory when a valid solution cannot be obtained.
-
----
-
-## 7. Real-Robot Implementation
-
-After simulation validation, the task was transferred to the physical **mechArm270** platform.
-
-The real-robot system consists of:
-
-- Jetson Orin
-- ROS 2 Humble
-- Elephant Robotics mechArm270
-- Adaptive gripper
-- ROS 2 real-robot driver
-- Fixed A/B workspace positions
-
-The real-robot control chain is:
-
-```text
-ROS 2 Task Node
-       │
-       ▼
-FollowJointTrajectory
-       │
-       ▼
-mecharm_real Driver
-       │
-       ▼
-Jetson Orin
-       │
-       ▼
-mechArm270
-```
-
-The real-robot stage preserves the ROS 2 trajectory-control architecture used in the simulation while adapting the communication and position parameters to the physical robot.
-
----
-
-## 8. ROS 2 Real-Robot Driver
-
-The real-robot driver connects ROS 2 trajectory commands to the physical mechArm270.
-
-### Driver Startup
-
-![Real Robot Driver](screenshots/real_robot_driver.png)
-
-*Figure 6. ROS 2 mechArm270 real-robot driver successfully started on the Jetson platform.*
-
-The driver provides the hardware interface required for executing the same high-level fixed-point manipulation workflow on the real robotic arm.
-
----
-
-## 9. Joint-State Feedback
-
-The physical robot publishes its current joint positions through ROS 2.
-
-The `/joint_states` topic contains the six arm joints and the gripper controller.
-
-### Joint-State Feedback
-
-![Joint States](screenshots/joint_states.png)
-
-*Figure 7. ROS 2 `/joint_states` feedback from the physical mechArm270.*
-
-This feedback provides confirmation that the software can obtain the current state of the real robot instead of operating only through open-loop commands.
-
----
-
-## 10. Real-Robot Grasping Results
-
-The real-robot fixed-point grasping task was tested repeatedly.
-
-### Five Independent A → B Tests
-
-| Run | Result | Execution Time |
-|---:|:---:|---:|
-| 1 | Success | 36.026 s |
-| 2 | Success | 36.038 s |
-| 3 | Success | 36.060 s |
-| 4 | Success | 35.914 s |
-| 5 | Success | 35.954 s |
-| **Total** | **5 / 5 Success** | **Average: 35.998 s** |
-
-The five independent real-robot tests achieved a **100% success rate**.
-
-In addition, a continuous bidirectional transfer test was performed:
-
-```text
-A → B → A → B → A → B
-```
-
-All five transfer segments were completed successfully.
-
-**Total execution time: 194.076 s**
-
-### Continuous Real-Robot Transfer
-
-![Real Robot Continuous Transfer](screenshots/real_robot_transfer.png)
-
-*Figure 8. ROS 2 real-robot continuous transfer test.*
-
----
-
-## 11. Safety Validation
-
-Safety handling was also verified on the physical robot.
-
-An intentionally invalid target was sent to `joint1_to_base`:
-
-```text
-Target position: 2.967 rad
-```
-
-The target exceeded the configured URDF joint limit.
-
-The trajectory action rejected the command and returned:
-
-```text
-error_code: -5
-Goal finished with status: ABORTED
-```
-
-The robot joint position remained unchanged before and after the rejected command, demonstrating that the invalid target did not result in physical robot motion.
-
-### Joint-Limit Safety Test
-
-![Joint Limit Safety Test](screenshots/joint_limit_abort.png)
-
-*Figure 9. Out-of-limit joint command rejected by the ROS 2 real-robot control system.*
-
-This test verifies that the system can identify an unsafe trajectory target and stop the corresponding task instead of executing an invalid motion.
-
----
-
-## 12. Experimental Results Summary
-
-| Test | Result |
-|---|---|
-| Gazebo fixed-point grasping workflow | Completed |
-| Simulation repeated grasping | 5 / 5 completed |
-| Simulation trajectory recording | Completed |
-| Simulation exception handling | Completed |
-| ROS 2 real-robot driver | Completed |
-| Real-robot joint-state feedback | Completed |
-| Real-robot A → B grasping | 5 / 5 successful |
-| Average real-robot execution time | 35.998 s |
-| Continuous real-robot transfer | 5 segments completed |
-| Continuous transfer time | 194.076 s |
-| Joint-limit safety test | ABORTED correctly |
-| Demonstration videos | Completed |
-
----
-
-## 13. Repository Structure
+The repository is organized into corresponding simulation and real-robot sections.
 
 ```text
 Experiment_2/
+├── README.md
 │
 ├── simulation/
 │   ├── code/
+│   ├── config/
 │   ├── logs/
 │   ├── screenshots/
-│   └── report_materials/
+│   └── README.md
 │
-├── real_robot/
-│   ├── code_driver/
-│   ├── code_grasp/
-│   └── logs/
-│
-├── report/
-│   ├── figures/
-│   ├── experiment_report.tex
-│   └── experiment_report.pdf
-│
-├── screenshots/
-│
-├── .gitignore
-└── README.md
+└── real_robot/
+    ├── code/
+    ├── config/
+    ├── logs/
+    ├── screenshots/
+    └── README.md
 ```
 
-### Directory Description
+Both stages use the same basic organization:
 
-- `simulation/` — Gazebo simulation packages, configuration files, logs, screenshots, and validation materials.
-- `real_robot/` — ROS 2 real-robot driver, grasping task, parameters, and experimental logs.
-- `report/` — LaTeX source, report figures, and final PDF report.
-- `screenshots/` — Images displayed in this README.
-- `README.md` — Project documentation and experimental summary.
+- `code/` — ROS 2 nodes and task programs
+- `config/` — robot and task parameters
+- `logs/` — experiment results, trajectories, and error records
+- `screenshots/` — key experimental evidence
+- `README.md` — stage-specific documentation
 
 ---
 
-## 14. Main Software and Hardware
+## 3. System Architecture
 
-### Software
+ROS 2 is used as the common control framework for both simulation and real-robot execution.
+
+```text
+                    ROS 2 Task Node
+                          |
+                          v
+                 Trajectory Command
+                          |
+             +------------+------------+
+             |                         |
+             v                         v
+      Simulation Stage          Real-Robot Stage
+   Gazebo / Ignition           mechArm270 Driver
+             |                         |
+             v                         v
+      Simulated Robot             Real Robot
+             |                         |
+             +------------+------------+
+                          |
+                          v
+                 /joint_states Feedback
+```
+
+The simulation stage is first used to verify the task logic and robot motion. After successful simulation verification, the same ROS 2 control concept is transferred to the physical mechArm270 platform.
+
+---
+
+## 4. Simulation Environment
+
+The simulation stage was implemented using:
 
 - Ubuntu 22.04
 - ROS 2 Humble
 - Gazebo / Ignition
 - MoveIt 2
 - ros2_control
-- Python 3
+- mechArm270 robot model
+- Adaptive gripper
+- Fixed table and target object
 
-### Hardware
+The simulated scene contains the robotic arm, gripper, working table, and grasping object.
+
+### 4.1 Simulation Scene
+
+The following figure shows the mechArm270 simulation environment and target object.
+
+![Simulation Scene](simulation/screenshots/01_simulation_scene.png)
+
+The robot is positioned beside the worktable, and the target object is placed at the predefined grasping point.
+
+### 4.2 Robot and Workspace
+
+The complete robot model and workspace were verified in Gazebo before executing the grasping task.
+
+![Robot Scene](simulation/screenshots/02_robot_scene.png)
+
+This stage was used to verify robot model loading, joint configuration, gripper configuration, collision geometry, and workspace arrangement.
+
+---
+
+## 5. Fixed-Point Pick-and-Place Task
+
+Two predefined locations are used:
+
+- **Point A:** grasping position
+- **Point B:** placement position
+
+A safe height is defined above the workspace to reduce the possibility of collision during horizontal motion.
+
+The task sequence is:
+
+1. Return the robot to the Home position.
+2. Open the gripper.
+3. Move to the safe position above Point A.
+4. Descend to the grasping position.
+5. Close the gripper.
+6. Lift the object vertically.
+7. Move through the safe region toward Point B.
+8. Descend to the placement position.
+9. Open the gripper.
+10. Return to the safe height.
+11. Return the robot to Home.
+
+### 5.1 Task Execution
+
+![Task Execution](simulation/screenshots/03_task_execution.png)
+
+The task node executes the predefined sequence through ROS 2 and sends trajectory commands to the robot controller.
+
+---
+
+## 6. Simulation Validation
+
+The simulation was tested repeatedly to evaluate the stability of the complete grasping workflow.
+
+The experiment records include:
+
+- grasping result
+- target position
+- trajectory information
+- execution summary
+- abnormal-condition records
+
+### 6.1 Terminal Execution
+
+The following screenshot shows the ROS 2 task running from the terminal.
+
+![Terminal Execution](simulation/screenshots/04_terminal_execution.png)
+
+### 6.2 Repeated Grasping Test
+
+Five consecutive grasping cycles were executed.
+
+![Five Run Results](simulation/screenshots/05_results.png)
+
+The recorded results were:
+
+```text
+cycle,success,object_x,object_y,object_z,detail
+1,1,0.0699,-0.0800,0.7625,ok
+2,1,0.1041,0.0203,0.7625,ok
+3,1,0.0701,-0.0799,0.7625,ok
+4,1,0.1041,0.0207,0.7625,ok
+5,1,0.0710,-0.0799,0.7625,ok
+```
+
+Therefore:
+
+**Simulation result: 5/5 grasping cycles completed successfully.**
+
+Trajectory data were also recorded during execution for later analysis.
+
+---
+
+## 7. Abnormal and Safety Test
+
+Safety handling was tested by intentionally providing an invalid or unreachable target.
+
+The control program detects abnormal conditions such as:
+
+- unreachable target position
+- invalid inverse-kinematics solution
+- joint-limit violation
+- trajectory execution timeout
+
+When an invalid target is detected, the current task is rejected or stopped instead of forcing the robot to continue moving.
+
+![Abnormal Test](simulation/screenshots/06_abnormal_test.png)
+
+The error log records abnormal events and provides diagnostic information.
+
+This verifies that the system can stop safely when the requested target cannot be executed.
+
+---
+
+## 8. Real-Robot Implementation
+
+After the simulation workflow was verified, the task was transferred to the physical robot.
+
+The real-robot platform consists of:
 
 - NVIDIA Jetson Orin
 - Elephant Robotics mechArm270
-- Adaptive gripper
-- Fixed work surface and target object
+- Gripper
+- ROS 2 Humble
+- Real-robot ROS 2 driver
+- Fixed-point grasping task node
+
+The real-robot stage retains the ROS 2 trajectory-control architecture while replacing the simulation interface with hardware communication.
 
 ---
 
-## 15. Key Features
+## 9. Real-Robot Driver
 
-- Complete simulation-to-real-robot workflow
-- ROS 2 based trajectory control
-- Fixed-point pick-and-place task
-- Gazebo simulation validation before real-robot operation
-- Repeated grasping validation
-- Joint-state feedback
-- Trajectory and result logging
-- Unreachable-target handling
-- Joint-limit safety protection
-- Real-robot repeated execution
-- LaTeX-based experiment documentation
+The real robot is controlled through the ROS 2 driver running on the Jetson platform.
+
+The following screenshot shows the driver successfully entering the ready state.
+
+![Real Robot Driver](real_robot/screenshots/01_driver_ready.png)
+
+The driver communicates with the mechArm270 and provides the ROS 2 interface required by the grasping task.
 
 ---
 
-## 16. Experiment Report
+## 10. Continuous Real-Robot Transfer Test
 
-The final experiment report is written in **LaTeX** as required by the course.
+The physical robot was tested using repeated fixed-point transfer sequences.
 
-The report includes:
-
-- Experimental objectives
-- System architecture
-- Simulation design
-- Fixed-point grasping workflow
-- Real-robot implementation
-- Experimental results
-- Five-run validation
-- Exception and safety tests
-- GitHub repository and commit records
-- Analysis and conclusion
-
-The LaTeX source and compiled PDF will be available in:
+The real-robot sequence includes:
 
 ```text
-report/
+HOME
+→ A_SAFE
+→ A_PICK
+→ Close Gripper
+→ A_CLEAR
+→ B_CLEAR
+→ B_PLACE
+→ Open Gripper
+→ B_CLEAR
+→ HOME
 ```
 
----
-
-## 17. Demonstration
-
-Simulation and real-robot demonstration videos were recorded separately as part of the experiment submission materials.
-
-The videos demonstrate:
-
-- Gazebo fixed-point grasping
-- Repeated simulation execution
-- Real mechArm270 fixed-point grasping
-- Continuous real-robot transfer
-
----
-
-## 18. Authors
-
-Group members:
+The task was further tested using repeated bidirectional transfer:
 
 ```text
-Name: ____________________
-Student ID: ______________
-
-Name: ____________________
-Student ID: ______________
+A → B → A → B → A → B
 ```
+
+The following terminal output shows the continuous ROS 2 execution process.
+
+![Continuous Transfer](real_robot/screenshots/02_continuous_transfer.png)
+
+The continuous transfer sequence completed successfully, demonstrating that the robot could repeatedly execute the predefined joint trajectories.
 
 ---
 
-## 19. Course Submission
+## 11. ROS 2 Joint-State Feedback
 
-This repository contains the code, configuration, experimental records, screenshots, and LaTeX report materials for **Experiment 2**.
+The physical robot publishes its current joint state through ROS 2.
 
-Git commit history is retained to document the development and submission process.
+The `/joint_states` topic was used to verify that joint feedback could be received correctly.
+
+![Joint States](real_robot/screenshots/03_joint_states.png)
+
+The returned state contains the positions of:
+
+- `joint1_to_base`
+- `joint2_to_joint1`
+- `joint3_to_joint2`
+- `joint4_to_joint3`
+- `joint5_to_joint4`
+- `joint6_to_joint5`
+- `gripper_controller`
+
+This confirms the feedback path between the physical robot driver and ROS 2.
+
+---
+
+## 12. Real-Robot Safety Verification
+
+A joint-limit test was performed to verify the safety behavior of the physical robot.
+
+An intentionally invalid joint target was sent to the controller.
+
+The controller detected that the requested value exceeded the URDF joint limit and rejected the command.
+
+![Joint Limit Abort](real_robot/screenshots/04_joint_limit_abort.png)
+
+The returned result included:
+
+```text
+error_code: -5
+error_string: joint joint1_to_base target 2.967 exceeds URDF limit
+Goal finished with status: ABORTED
+```
+
+The robot did not execute the invalid target.
+
+This test demonstrates that the real-robot control system can reject unsafe commands before physical motion occurs.
+
+---
+
+## 13. Experimental Results
+
+The main results of Experiment 2 are summarized below.
+
+| Test | Result |
+|---|---|
+| Simulation environment startup | Passed |
+| ROS 2 trajectory control | Passed |
+| Fixed-point grasping workflow | Passed |
+| Simulation repeated grasping | 5/5 completed |
+| Trajectory recording | Completed |
+| Abnormal target handling | Passed |
+| Real-robot ROS 2 driver | Passed |
+| Real-robot joint-state feedback | Passed |
+| Real-robot fixed-point transfer | Passed |
+| Five consecutive bidirectional transfer segments | Completed |
+| Joint-limit safety test | ABORTED as expected |
+
+The experiment demonstrates that the fixed-point manipulation workflow can first be developed and verified in simulation and then transferred to a physical mechArm270 robot while retaining the ROS 2 control architecture.
+
+---
+
+## 14. Key Parameters
+
+The fixed-point task uses predefined positions, offsets, safe height, motion duration, and repeat count.
+
+Representative parameters used during the experiment include:
+
+```yaml
+station_a_position: [0.10, 0.02, 0.7635]
+station_b_position: [0.07, -0.08, 0.7635]
+
+safe_height: 0.065
+
+station_a_offset: 0.002
+station_b_offset: 0.008
+
+placement_tolerance: 0.03
+tool_tip_offset: 0.063
+
+arm_move_time: 4.5
+gripper_move_time: 1.2
+
+repeat_count: 5
+```
+
+These parameters define the fixed pick-and-place workspace and the timing of the robot motion.
+
+---
+
+## 15. Logs and Reproducibility
+
+Experimental evidence is retained in the repository instead of only presenting final screenshots.
+
+The simulation and real-robot folders contain corresponding `logs/` directories for:
+
+- trajectory records
+- execution results
+- summary information
+- abnormal-condition records
+
+This allows the experiment results to be inspected after execution and improves reproducibility.
+
+The source code and configuration files are also retained separately so that the experiment structure, task parameters, and control implementation can be reviewed.
+
+---
+
+## 16. Conclusion
+
+Experiment 2 successfully implemented a complete ROS 2 based fixed-point grasping and transfer workflow for the mechArm270 robotic arm.
+
+The task was first developed and validated in Gazebo / Ignition simulation. The simulation stage verified robot motion, gripper operation, fixed-point task sequencing, repeated execution, trajectory recording, and abnormal-condition handling.
+
+After simulation verification, the same overall ROS 2 control architecture was transferred to the physical mechArm270 platform. The real-robot tests verified hardware communication, trajectory execution, gripper operation, joint-state feedback, repeated fixed-point transfer, and joint-limit protection.
+
+The final system therefore demonstrates the complete workflow:
+
+**Simulation Verification → ROS 2 Control Validation → Real-Robot Deployment → Repeated Execution → Safety Verification**
+
+---
+
+## 17. Repository Contents
+
+For detailed files, see:
+
+- [`simulation/`](simulation/) — simulation code, configuration, logs, and screenshots
+- [`real_robot/`](real_robot/) — real-robot code, configuration, logs, and screenshots
+
+The formal **LaTeX experiment report** and demonstration videos are prepared separately according to the course submission requirements.
