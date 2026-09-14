@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<!--
+  抓取实验场景：地面 + 桌子 + 目标物。
+  机械臂由 launch 文件用 ros_gz_sim 的 create 动态生成（放在桌面上），
+  这样机器人模型只维护一份 URDF，不用在 SDF 里重复。
+  坐标约定：桌面高 0.75m；取物点 A / 放置点 B 的世界坐标写在
+  grasp_params.yaml 里，物体初始位姿必须与 A 点一致。
+-->
+<sdf version="1.8">
+  <world name="grasp_world">
+    <physics name="default" type="ignored">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <plugin filename="libignition-gazebo-physics-system.so" name="ignition::gazebo::systems::Physics"/>
+    <plugin filename="libignition-gazebo-scene-broadcaster-system.so" name="ignition::gazebo::systems::SceneBroadcaster"/>
+    <plugin filename="libignition-gazebo-user-commands-system.so" name="ignition::gazebo::systems::UserCommands"/>
+
+    <light type="directional" name="sun">
+      <cast_shadows>false</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <direction>-0.3 0.2 -0.9</direction>
+    </light>
+
+    <model name="ground">
+      <static>true</static>
+      <link name="ground_link">
+        <collision name="c"><geometry><plane><normal>0 0 1</normal><size>10 10</size></plane></geometry></collision>
+        <visual name="v"><geometry><plane><normal>0 0 1</normal><size>10 10</size></plane></geometry>
+          <material><ambient>0.5 0.5 0.5 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 桌子：实心方块，桌面高 0.75m -->
+    <model name="table">
+      <static>true</static>
+      <pose>0.1 0 0.375 0 0 0</pose>
+      <link name="table_link">
+        <collision name="c"><geometry><box><size>0.9 0.7 0.75</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.9 0.7 0.75</size></box></geometry>
+          <material><ambient>0.6 0.45 0.3 1</ambient><diffuse>0.6 0.45 0.3 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 目标物：25mm 方块 50g（要求 ≤100g），初始位姿 = 取物点 A。
+         纯物理抓取：靠手指接触力 + 高摩擦把它夹起，无任何吸附。
+         OdometryPublisher 仅用于结果判定（读位姿真值）。 -->
+    <model name="target_object">
+      <pose>0.10 0.02 0.7635 0 0 0</pose>
+      <plugin filename="libignition-gazebo-odometry-publisher-system.so" name="ignition::gazebo::systems::OdometryPublisher">
+        <odom_publish_frequency>30</odom_publish_frequency>
+      </plugin>
+      <link name="body">
+        <inertial>
+          <mass>0.05</mass>
+          <inertia><ixx>5.2e-6</ixx><iyy>5.2e-6</iyy><izz>5.2e-6</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+        </inertial>
+        <collision name="c">
+          <geometry><box><size>0.025 0.025 0.025</size></box></geometry>
+          <surface><friction><ode><mu>2.0</mu><mu2>2.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="v"><geometry><box><size>0.025 0.025 0.025</size></box></geometry>
+          <material><ambient>0.9 0.15 0.15 1</ambient><diffuse>0.9 0.15 0.15 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>
