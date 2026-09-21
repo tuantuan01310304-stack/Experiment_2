@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
-"""LWS 双点往返搬运任务节点。
+"""LWS 机械臂双工位往返搬运程序。
 
-流程：回零 → A点上方 → 下降 → 夹取 → 抬升 → B点上方 → 下降 → 释放 → 回零。
-A/B 点、安全高度等全部来自参数文件；控制接口只用 ros2_control 的
-FollowJointTrajectory 动作，仿真与真机共用本节点，切真机只换硬件后端。
+任务顺序保持为：初始位 → 取物点上方 → 下探夹取 → 抬升 → 放置点上方
+→ 下探释放 → 返回初始位。A、B 两个工位以及运动相关参数统一从 ROS2
+参数中读取，因此同一套任务流程可以用于 Gazebo 仿真和真实硬件环境。
 
-关键设计：
-- 逆解：自带数值 IK（阻尼最小二乘 + 数值雅可比），约束"指尖到点 + 工具竖直
-  向下"。IK 不收敛 = 目标不可达，任务拒绝启动并输出错误（验收要求）。
-- 限位保护：每个下发的关节目标都先经限位校验，超限即报错停止。
-- 仿真吸附：Gazebo 里夹爪与物体的接触物理很难稳定，通用做法是夹取判定
-  成功后将物体"吸附"跟随工具运动（10Hz 调 Gazebo set_pose 服务）。
-  真机上 sim_attach=false，该逻辑整体停用，真实夹爪自然接管。
-- 日志：轨迹 CSV、逐次结果、错误日志写入 log_dir（验收要求）。
+程序主要包含以下部分：
+1. 使用数值法完成机械臂逆运动学求解，并在下发前检查关节范围；
+2. 通过 FollowJointTrajectory 控制机械臂和夹爪执行连续动作；
+3. 仿真模式下让目标物体平滑跟随夹持中心，真机模式可关闭该功能；
+4. 将轨迹、执行结果和异常信息分别保存到日志文件，便于任务检查。
 """
 import math
 import os
@@ -41,15 +38,15 @@ ARM_JOINTS = [
 ]
 GRIPPER_JOINT = 'gripper_controller'
 
-# 关节限位，与 URDF 一致（rad）
+# 六个机械臂关节的允许角度范围，单位为 rad
 JOINT_LIMITS = [
     (-2.792527, 2.792527), (-1.3089, 2.0943), (-3.0543, 1.1344),
     (-2.7052, 2.7052), (-2.0071, 2.0071), (-3.14, 3.14),
 ]
 
-# ---------- 机械臂运动学模型 ----------
+# ---------- 机械臂运动学计算 ----------
 
-def rpy_mat(r, p, y):
+def rpy_mat(r, p, y):#roll/pitch/yaw  得出旋转矩阵
     cr, sr, cp, sp, cy, sy = math.cos(r), math.sin(r), math.cos(p), math.sin(p), math.cos(y), math.sin(y)
     return np.array([
         [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
@@ -61,100 +58,100 @@ def make_T(xyz, rpy):
     T = np.eye(4)
     T[:3, :3] = rpy_mat(*rpy)
     T[:3, 3] = xyz
-    return T
+    return T#构造齐次变化矩阵
 
 
-# 根据 URDF 关节原点建立静态变换，再叠加各关节绕 z 轴的旋转
+# 按 URDF 中的关节原点建立连杆变换，随后叠加各关节的 z 轴转动
 CHAIN = [
     make_T([0, 0, 0.1], [0, 0, 0]),
     make_T([0, 0, 0.038], [-1.5708, 0, 0]),
     make_T([0.0, -0.1, 0], [0, 0, 0]),
     make_T([0.108, -0.005, -0.001], [0, 1.5708, 0]),
     make_T([-0.001, 0, 0.0], [0, -1.5708, 0]),
-    make_T([0.06, 0.0, -0.0], [0, 1.5708, 0]),
+    make_T([0.06, 0.0, -0.0], [0, 1.5708, 0]),#构造机械臂连杆模型，一个关节相对于前一个关节的位移与旋转
 ]
 T_FLANGE = make_T([0, 0, 0.038], [1.579, 0, 0])  # link6 → gripper_base
 
 
-def rz(q):
+def rz(q):#rotate z
     T = np.eye(4)
     c, s = math.cos(q), math.sin(q)
     T[0, 0], T[0, 1], T[1, 0], T[1, 1] = c, -s, s, c
     return T
 
 
-def fk(q):
+def fk(q):#正运动学，在base坐标系中的位置
     """返回 (link6 位姿 4x4, gripper_base 位姿 4x4)，基座坐标系。"""
-    T = np.eye(4)
+    T = np.eye(4)#base坐标系
     for i in range(6):
         T = T @ CHAIN[i] @ rz(q[i])
     return T, T @ T_FLANGE
 
 
-def tip_pos(q, tool_offset):
+def tip_pos(q, tool_offset):#末端到达目标点
     """指尖位置（基座系）：gripper_base 原点沿 link6 z 轴（工具接近轴）前伸。"""
     T6, Tg = fk(q)
-    return Tg[:3, 3] + T6[:3, 2] * tool_offset, T6[:3, 2]
+    return Tg[:3, 3] + T6[:3, 2] * tool_offset, T6[:3, 2]#gripper_base的位置+工具轴方向*工具长度
 
-
+#逆运动学：通过目标位置去推测如何到达
 def solve_ik(target, tool_offset, seed=None, iters=250):
     """数值 IK：指尖到 target，工具轴接近竖直向下（允许 ≤ ~15° 倾角，
     小臂行程有限，严格竖直会把大量桌面区域判为不可达）。
     位置权重高于姿态。返回 q 或 None（不可达）。"""
     lo = np.array([l for l, _ in JOINT_LIMITS])
     hi = np.array([h for _, h in JOINT_LIMITS])
-    seeds = [seed] if seed is not None else []
-    yaw = math.atan2(target[1], target[0])
+    seeds = [seed] if seed is not None else []#初始猜测，如果上一个位置游街，就直接优先拿它作为下一次IK的初始值
+    yaw = math.atan2(target[1], target[0])#算yaw
     seeds += [
         np.array([yaw, 0.8, -1.6, 0.0, -0.8, 0.0]),
         np.array([yaw, 0.4, -1.0, 0.0, -1.0, 0.0]),
         np.array([yaw, 1.2, -2.0, 0.0, -0.6, 0.0]),
     ]
     rng = np.random.default_rng(42)  # 固定种子保证可复现
-    seeds += [lo + rng.random(6) * (hi - lo) for _ in range(12)]
-    down = np.array([0, 0, -1.0])
+    seeds += [lo + rng.random(6) * (hi - lo) for _ in range(12)]#关节角
+    down = np.array([0, 0, -1.0])#工具轴设置为世界坐标的负方向，也就是夹爪竖直向下
     AXIS_W = 0.4  # 姿态项权重（位置为 1）
     # IK 优先选择接近参考姿态的解，减少连续动作之间的大幅关节跳变
     q_ref = seed if seed is not None else np.array([yaw, 0.6, -1.2, 0.0, -0.8, 0.0])
     solutions = []
-    for q in seeds:
+    for q in seeds:#开始尝试每一个初始值
         q = np.clip(np.asarray(q, dtype=float).copy(), lo, hi)
         for _ in range(iters):
-            p, axis = tip_pos(q, tool_offset)
-            r = np.concatenate([p - target, AXIS_W * (axis - down)])
-            if np.linalg.norm(p - target) < 0.002 and np.linalg.norm(axis - down) < 0.26:
+            p, axis = tip_pos(q, tool_offset)#算当前之间位置p工具方向axis
+            r = np.concatenate([p - target, AXIS_W * (axis - down)])#计算误差（包括位置误差和姿态误差）
+            if np.linalg.norm(p - target) < 0.002 and np.linalg.norm(axis - down) < 0.26:#判断IK是否成功，成功保存
                 solutions.append(np.clip(q, lo, hi))
                 break
-            J = np.zeros((6, 6))
-            eps = 1e-5
-            for i in range(6):
+            J = np.zeros((6, 6))#不成功计算雅可比矩阵
+            eps = 1e-5#增加微小扰动
+            for i in range(6):#六个关节都一点一点的动
                 dq = q.copy()
                 dq[i] += eps
                 p2, a2 = tip_pos(dq, tool_offset)
-                J[:, i] = np.concatenate([(p2 - p), AXIS_W * (a2 - axis)]) / eps
-            step = np.linalg.solve(J.T @ J + 1e-4 * np.eye(6), J.T @ r)
-            q = np.clip(q - np.clip(step, -0.3, 0.3), lo, hi)
+                J[:, i] = np.concatenate([(p2 - p), AXIS_W * (a2 - axis)]) / eps#用雅可比矩阵计算每一列队末端误差的影响
+            step = np.linalg.solve(J.T @ J + 1e-4 * np.eye(6), J.T @ r)#阻尼最小二乘IK更新量，是数值计算更稳定
+            q = np.clip(q - np.clip(step, -0.3, 0.3), lo, hi)#限制每次关节变化
     if not solutions:
         return None
-    return min(solutions, key=lambda s: np.linalg.norm(s - q_ref))
+    return min(solutions, key=lambda s: np.linalg.norm(s - q_ref))#如果找到多个解，就选择里参考姿态最近的解
 
 
-def align_jaw(q):
+def align_jaw(q):#解决机械臂到目标位置但是夹爪方向歪了
     """调整腕转角 q6，使夹爪开合方向（gripper_base x 轴）对齐世界坐标轴。
     方块的面沿世界轴摆放，虎口若斜着合拢会怼在棱角上把物体挤出去。
     数值牛顿迭代：q6 对水平开合角的导数用有限差分求。"""
     q = q.copy()
     for _ in range(4):
         _, Tg = fk(q)
-        jaw = Tg[:3, 0]
-        phi = math.atan2(jaw[1], jaw[0])
-        delta = phi - round(phi / (math.pi / 2)) * (math.pi / 2)
-        if abs(delta) < 0.01:
+        jaw = Tg[:3, 0]#取gripperbase的x轴方向
+        phi = math.atan2(jaw[1], jaw[0])#夹爪开合方向在XY平面的角度
+        delta = phi - round(phi / (math.pi / 2)) * (math.pi / 2)#看当前的夹爪方向距离最近的教务有多远
+        if abs(delta) < 0.01:#如果非常接近就不用调整
             break
         q2 = q.copy()
         q2[5] += 0.01
         _, Tg2 = fk(q2)
-        jaw2 = Tg2[:3, 0]
+        jaw2 = Tg2[:3, 0]#调整q6看夹爪方向的变化
         dphi = (math.atan2(jaw2[1], jaw2[0]) - phi) / 0.01
         if abs(dphi) < 1e-3:
             break
@@ -162,75 +159,77 @@ def align_jaw(q):
     return q
 
 
-class LwsTransferTask(Node):
+class LwsTransferTask(Node):#正式进入任务
     def __init__(self):
         super().__init__('lws_transfer_node')
-        for name, default in [
+        for name, default in [#写入参数
             ('base_pose_xyz', [0.0, 0.0, 0.75]), ('station_a_position', [0.10, 0.02, 0.7635]),
             ('station_b_position', [0.07, -0.08, 0.7635]), ('safe_height', 0.08),
             ('station_a_offset', 0.002), ('station_b_offset', 0.008),
             ('placement_tolerance', 0.03),
             ('tool_tip_offset', 0.10), ('gripper_open', 0.1), ('gripper_close', -0.55),
-            ('arm_move_time', 2.5), ('gripper_move_time', 1.2), ('repeat_count', 5),
+            ('arm_move_time', 2.55), ('gripper_move_time', 1.25), ('repeat_count', 5),
             ('log_dir', '/home/nvidia/lws/grasp_logs'), ('world_name', 'grasp_world'),
             ('sim_attach', True), ('sim_check', True),
         ]:
             self.declare_parameter(name, default)
-        g = lambda n: self.get_parameter(n).value
-        self.base = np.array(g('base_pose_xyz'))
-        self.station_a_position = np.array(g('station_a_position'))
-        self.station_b_position = np.array(g('station_b_position'))
-        self.safe_h = g('safe_height')
-        self.station_a_offset = g('station_a_offset')
-        self.station_b_offset = g('station_b_offset')
-        self.placement_tolerance = g('placement_tolerance')
-        self.tool_off = g('tool_tip_offset')
-        self.grip_open, self.grip_close = g('gripper_open'), g('gripper_close')
-        self.arm_move_time, self.gripper_move_time = g('arm_move_time'), g('gripper_move_time')
-        self.repeat_count = int(g('repeat_count'))
-        self.world = g('world_name')
-        self.sim_attach = bool(g('sim_attach'))
+        read_param = lambda n: self.get_parameter(n).value#读取参数，把参数保存为对象成员
+        self.base = np.array(read_param('base_pose_xyz'))
+        self.station_a_position = np.array(read_param('station_a_position'))
+        self.station_b_position = np.array(read_param('station_b_position'))
+        self.safe_h = read_param('safe_height')
+        self.station_a_offset = read_param('station_a_offset')
+        self.station_b_offset = read_param('station_b_offset')
+        self.placement_tolerance = read_param('placement_tolerance')
+        self.tool_off = read_param('tool_tip_offset')
+        self.grip_open, self.grip_close = read_param('gripper_open'), read_param('gripper_close')
+        self.arm_move_time, self.gripper_move_time = read_param('arm_move_time'), read_param('gripper_move_time')
+        self.repeat_count = int(read_param('repeat_count'))
+        self.world = read_param('world_name')
+        self.sim_attach = bool(read_param('sim_attach'))
         # 仿真模式读取 Gazebo 物体位姿用于结果检查；真机模式关闭该功能
-        self.sim_check = bool(g('sim_check'))
-        self.log_dir = os.path.expanduser(g('log_dir'))
+        self.sim_check = bool(read_param('sim_check'))
+        self.log_dir = os.path.expanduser(read_param('log_dir'))
         os.makedirs(self.log_dir, exist_ok=True)
 
-        cb = ReentrantCallbackGroup()
-        self.arm_cli = ActionClient(self, FollowJointTrajectory,
-                                    '/arm_controller/follow_joint_trajectory', callback_group=cb)
-        self.hand_cli = ActionClient(self, FollowJointTrajectory,
-                                     '/hand_controller/follow_joint_trajectory', callback_group=cb)
-        self.status_pub = self.create_publisher(String, '/grasp_status', 10)
-        self.joint_q = {}
-        self.create_subscription(JointState, '/joint_states', self._on_js, 10, callback_group=cb)
+        callback_group = ReentrantCallbackGroup()
+        #创建机械臂Action Client
+        self.arm_cli = ActionClient(self, FollowJointTrajectory,#机械臂轨迹
+                                    '/arm_controller/follow_joint_trajectory', callback_group=callback_group)
+        self.hand_cli = ActionClient(self, FollowJointTrajectory,#夹爪
+                                     '/hand_controller/follow_joint_trajectory', callback_group=callback_group)
+        self.status_pub = self.create_publisher(String, '/grasp_status', 10)#状态发布器
+        self.joint_q = {}#订阅关节状态，监听/joint_states，每次收到关节状态self._on_js()就会被调用
+        self.create_subscription(JointState, '/joint_states', self._on_js, 10, callback_group=callback_group)
         # 吸附搬运：物体里程计反馈 + 速度指令（经 ros_gz_bridge 常驻桥接，30Hz 平滑）
-        self.obj_pos = None
+        self.obj_pos = None#物体位置
         self.create_subscription(Odometry, '/model/target_object/odometry',
-                                 self._on_obj_odom, 10, callback_group=cb)
-        self.obj_vel_pub = self.create_publisher(Twist, '/model/target_object/cmd_vel', 10)
-
+                                 self._on_obj_odom, 10, callback_group=callback_group)#订阅里程计
+        self.obj_vel_pub = self.create_publisher(Twist, '/model/target_object/cmd_vel', 10)#控制物体速度，Gazebo 中的物体实际上通过速度控制跟随机械臂
+#创建日志文件、轨迹记录、错误记录每次搬运的最终位置等
         self.traj_file = open(os.path.join(self.log_dir, 'trajectory.csv'), 'w')
         self.traj_file.write('stamp,' + ','.join(ARM_JOINTS + [GRIPPER_JOINT]) + '\n')
         self.err_file = open(os.path.join(self.log_dir, 'errors.log'), 'a')
         self.res_file = open(os.path.join(self.log_dir, 'results.csv'), 'w')
         self.res_file.write('cycle,success,object_x,object_y,object_z,detail\n')
-
+#吸附定时器，等待0.5秒
         self.attach_on = False
-        self.attach_timer = self.create_timer(1.0 / 30, self._attach_tick, callback_group=cb)
+        self.attach_timer = self.create_timer(1.0 / 30, self._attach_tick, callback_group=callback_group)
+        #启动任务线程，节点初始化完成后自动开始搬运任务
         self.worker = threading.Thread(target=self.run_task, daemon=True)
         self.worker.start()
 
-    # ---------- ROS 通信与日志 ----------
+    # ---------- ROS2 通信与运行记录 ----------
     def status(self, text):
-        self.get_logger().info(text)
-        self.status_pub.publish(String(data=text))
-
+        self.get_logger().info(text)#打印
+        self.status_pub.publish(String(data=text))#发布
+    #处理错误+保存错误日志
     def fail(self, text):
         self.get_logger().error(text)
         self.err_file.write(f'{datetime.now().isoformat()} {text}\n')
         self.err_file.flush()
         self.status_pub.publish(String(data='ERROR: ' + text))
-
+   #读取joint_states
     def _on_js(self, msg):
         for n, p in zip(msg.name, msg.position):
             self.joint_q[n] = p
@@ -239,27 +238,29 @@ class LwsTransferTask(Node):
             t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
             self.traj_file.write(f'{t:.3f},' + ','.join(row) + '\n')
 
-    # ---------- 机械臂与夹爪控制 ----------
-    def _send_traj(self, client, joints, positions, duration):
-        for j, p in zip(joints, positions):
+    # ---------- 机械臂 / 夹爪轨迹控制 ----------
+    def _send_traj(self, client, joints, positions, duration):#发送机械臂动作
+        for j, p in zip(joints, positions):#逐个检查关节
             if j in ARM_JOINTS:
                 lo, hi = JOINT_LIMITS[ARM_JOINTS.index(j)]
                 if not (lo - 1e-6 <= p <= hi + 1e-6):
                     self.fail(f'关节 {j} 目标 {p:.3f} 超限 [{lo:.3f},{hi:.3f}]，拒绝执行')
                     return False
+        #构造轨迹
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = JointTrajectory()
-        goal.trajectory.joint_names = list(joints)
-        pt = JointTrajectoryPoint()
-        pt.positions = [float(p) for p in positions]
+        goal.trajectory.joint_names = list(joints)#要控制哪些关节
+        pt = JointTrajectoryPoint()#创建轨迹点
+        pt.positions = [float(p) for p in positions]#设置目标
         pt.time_from_start.sec = int(duration)
         pt.time_from_start.nanosec = int((duration % 1) * 1e9)
         goal.trajectory.points = [pt]
+        #发送
         fut = client.send_goal_async(goal)
-        t0 = time.time()
-        while not fut.done():
+        wait_start = time.time()
+        while not fut.done():#等待回应
             time.sleep(0.05)
-            if time.time() - t0 > 10:
+            if time.time() - wait_start > 10:
                 self.fail('发送轨迹目标超时（通信异常）')
                 return False
         gh = fut.result()
@@ -267,12 +268,12 @@ class LwsTransferTask(Node):
             self.fail('控制器拒绝轨迹目标')
             return False
         rf = gh.get_result_async()
-        t0 = time.time()
+        wait_start = time.time()
         # Gazebo 图形界面运行较慢时，实际等待时间可能明显长于轨迹设定时间。
         # 因此根据动作时长动态放宽超时阈值，避免正常的慢速动作被误判为失败。
         while not rf.done():
             time.sleep(0.05)
-            if time.time() - t0 > duration * 10 + 60:
+            if time.time() - wait_start > duration * 10 + 60:
                 self.fail('轨迹执行超时')
                 return False
         res = rf.result().result
@@ -281,13 +282,13 @@ class LwsTransferTask(Node):
             return False
         return True
 
-    def move_arm(self, q, duration=None):
+    def move_arm(self, q, duration=None):#简单封装，控制机械臂六个关节
         return self._send_traj(self.arm_cli, ARM_JOINTS, q, duration or self.arm_move_time)
 
-    def move_gripper(self, pos):
+    def move_gripper(self, pos):#控制夹爪
         return self._send_traj(self.hand_cli, [GRIPPER_JOINT], [pos], self.gripper_move_time)
 
-    # ---------- 仿真物体跟随控制 ----------
+    # ---------- Gazebo 目标物体跟随 ----------
     def _set_object_pose(self, xyz):
         req = (f'name: "target_object", position: {{x: {xyz[0]:.4f}, '
                f'y: {xyz[1]:.4f}, z: {xyz[2]:.4f}}}')
@@ -300,17 +301,17 @@ class LwsTransferTask(Node):
     def _on_obj_odom(self, msg):
         p = msg.pose.pose.position
         self.obj_pos = np.array([p.x, p.y, p.z])
-
+#吸附
     def _attach_tick(self):
         """30Hz 速度伺服：物体平滑追随夹持中心（P 控制，限速），
         比逐次调 set_pose 服务的"瞬移"流畅得多。"""
         if not (self.attach_on and self.sim_attach) or self.obj_pos is None:
-            return
+            return#吸附开始、仿真模式、知道物体位置
         # 释放阶段：伺服目标切换为 B 点本身，把物体精确送到位再松手
         if getattr(self, 'place_target', None) is not None:
-            target = self.place_target
-        else:
-            q = [self.joint_q.get(j) for j in ARM_JOINTS]
+            target = self.place_target#如果正在放置，就往B点和A点收敛
+        else:#否则计算当前位置在世界坐标系的位置
+            q = [self.joint_q.get(j) for j in ARM_JOINTS]#构造p控制器，发布物体速度，让gazebo物体超目标位置移动，跟着夹爪走
             if any(v is None for v in q):
                 return
             p, _ = tip_pos(np.array(q), self.tool_off)
@@ -337,24 +338,24 @@ class LwsTransferTask(Node):
             self.fail(f'读取物体位姿失败: {e}')
         return None
 
-    # ---------- 双点搬运流程 ----------
-    def build_transfer_waypoints(self):
+    # ---------- A/B 工位往返流程 ----------
+    def build_transfer_waypoints(self):#构造四个关键位置
         """计算 A、B 两个工作点对应的关节目标；存在不可达位置时返回 None。"""
-        station_a_local = self.station_a_position - self.base
-        station_b_local = self.station_b_position - self.base
+        point_a_local = self.station_a_position - self.base
+        point_b_local = self.station_b_position - self.base
         waypoints = {}
 
         # A、B 点分别设置接近位置和实际操作位置。
         # 上方位置用于安全转移，较低位置用于夹取或放置。
-        target_specs = {
-            'above_a': station_a_local + [0, 0, self.safe_h],
-            'at_a': station_a_local + [0, 0, self.station_a_offset],
-            'above_b': station_b_local + [0, 0, self.safe_h],
-            'at_b': station_b_local + [0, 0, self.station_b_offset],
+        pose_targets = {
+            'above_a': point_a_local + [0, 0, self.safe_h],
+            'at_a': point_a_local + [0, 0, self.station_a_offset],
+            'above_b': point_b_local + [0, 0, self.safe_h],
+            'at_b': point_b_local + [0, 0, self.station_b_offset],
         }
 
         seed = None
-        for name, target_position in target_specs.items():
+        for name, target_position in pose_targets.items():
             reach = np.linalg.norm(
                 target_position - np.array([0, 0, 0.138])
             )
@@ -364,21 +365,21 @@ class LwsTransferTask(Node):
                     f'({reach:.3f}m > 0.30m)'
                 )
                 return None
-
-            joint_solution = solve_ik(
+            #对四个位置逐个做IK
+            ik_solution = solve_ik(
                 np.array(target_position),
                 self.tool_off,
                 seed=seed
             )
-            if joint_solution is None:
+            if ik_solution is None:
                 self.fail(f'目标位置 {name} 无法获得有效关节解，停止当前任务')
                 return None
+            #夹爪位置修正
+            ik_solution = align_jaw(ik_solution)
+            waypoints[name] = ik_solution
+            seed = ik_solution
 
-            joint_solution = align_jaw(joint_solution)
-            waypoints[name] = joint_solution
-            seed = joint_solution
-
-        waypoints['home'] = np.zeros(6)
+        waypoints['home'] = np.zeros(6)#作为初始姿态q1=q2=q3=q4=q5=q6=0
         return waypoints
 
     def run_task(self):
@@ -402,26 +403,26 @@ class LwsTransferTask(Node):
         self.traj_file.close()
         self.res_file.close()
 
-    def _run_task_impl(self):
+    def _run_task_impl(self):#主流程
         time.sleep(2.0)
         self.status('正在连接机械臂控制器...')
         if not (self.arm_cli.wait_for_server(timeout_sec=60) and self.hand_cli.wait_for_server(timeout_sec=60)):
             self.fail('控制器动作服务器未上线，任务终止')
             return
-        t0 = time.time()
+        wait_start = time.time()
         while not all(j in self.joint_q for j in ARM_JOINTS):
             time.sleep(0.2)
-            if time.time() - t0 > 30:
+            if time.time() - wait_start > 30:
                 self.fail('等不到 /joint_states，通信异常，任务终止')
                 return
 
         self.status('正在计算各目标位姿...')
-        wp = self.build_transfer_waypoints()
-        if wp is None:
+        joint_waypoints = self.build_transfer_waypoints()
+        if joint_waypoints is None:
             self._abort('目标不可达（超出工作半径或无逆解），任务拒绝启动，机械臂保持安全停止')
             return
 
-        # 任务开始前检查仿真目标是否存在，避免无目标情况下继续执行
+        # 仿真任务开始前先确认目标模型存在，避免机械臂空执行
         if self.sim_check:
             self.status('正在确认目标物体位置...')
             pos = self.object_world_pose()
@@ -436,13 +437,13 @@ class LwsTransferTask(Node):
             # 上一次的放置点就是下一次的取物点，全程物理连续。
             pick, place = ('a', 'b') if cycle % 2 == 1 else ('b', 'a')
             self.status(f'===== 第 {cycle}/{self.repeat_count} 轮搬运任务（{pick.upper()}→{place.upper()}）=====')
-            ok = self.execute_transfer_cycle(cycle, wp, pick, place)
+            ok = self.execute_transfer_cycle(cycle, joint_waypoints, pick, place)
             if ok:
                 success_count += 1
             else:
                 self.status('当前轮次未完成，机械臂撤回')
                 self.attach_on = False
-                self.move_arm(wp['home'])
+                self.move_arm(joint_waypoints['home'])
                 break  # 往返链条断了，后续方向对不上，安全停止
         summary = f'搬运流程结束：共执行 {self.repeat_count} 轮，完成 {success_count} 轮'
         self.status(summary)
@@ -478,12 +479,12 @@ class LwsTransferTask(Node):
         time.sleep(pause_time)
         return True
 
-    def prepare_transfer(self, cycle, wp):
-        """搬运开始前回到初始姿态，并将夹爪调整为准备状态。"""
+    def prepare_transfer(self, cycle, joint_waypoints):
+        """搬运开始前回到初始姿态，并将夹爪调整为准备状态。"""#初始姿态：回零和张开夹爪
         if not self.run_transfer_step(
             cycle,
             '返回初始姿态',
-            lambda: self.move_arm(wp['home']),
+            lambda: self.move_arm(joint_waypoints['home']),
             0.8
         ):
             return False
@@ -498,20 +499,20 @@ class LwsTransferTask(Node):
 
         return True
 
-    def pick_object(self, cycle, wp, pick):
+    def pick_object(self, cycle, joint_waypoints, pick):
         """完成取物点接近、夹取和提升动作。"""
-        pick_name = pick.upper()
+        source_label = pick.upper()
 
         pick_steps = [
             (
-                f'移动至{pick_name}点等待位置',
-                lambda: self.move_arm(wp[f'above_{pick}']),
+                f'移动至{source_label}点等待位置',
+                lambda: self.move_arm(joint_waypoints[f'above_{pick}']),
                 1.0
             ),
             (
                 '靠近目标物体',
                 lambda: self.move_arm(
-                    wp[f'at_{pick}'],
+                    joint_waypoints[f'at_{pick}'],#下降
                     self.arm_move_time * 0.6
                 ),
                 0.8
@@ -524,7 +525,7 @@ class LwsTransferTask(Node):
             (
                 '提升目标物体',
                 lambda: self.move_arm(
-                    wp[f'above_{pick}'],
+                    joint_waypoints[f'above_{pick}'],
                     self.arm_move_time * 0.6
                 ),
                 0.8
@@ -539,20 +540,20 @@ class LwsTransferTask(Node):
 
         return True
 
-    def place_object(self, cycle, wp, place):
+    def place_object(self, cycle, joint_waypoints, place):
         """将物体转移到目标点，完成释放并安全离开目标区域。"""
-        place_name = place.upper()
+        destination_label = place.upper()
 
         place_steps = [
             (
-                f'转移至{place_name}点等待位置',
-                lambda: self.move_arm(wp[f'above_{place}']),
+                f'转移至{destination_label}点等待位置',
+                lambda: self.move_arm(joint_waypoints[f'above_{place}']),
                 1.0
             ),
             (
                 '靠近目标位置',
                 lambda: self.move_arm(
-                    wp[f'at_{place}'],
+                    joint_waypoints[f'at_{place}'],
                     self.arm_move_time * 0.6
                 ),
                 0.8
@@ -565,7 +566,7 @@ class LwsTransferTask(Node):
             (
                 '离开目标区域',
                 lambda: self.move_arm(
-                    wp[f'above_{place}'],
+                    joint_waypoints[f'above_{place}'],
                     self.arm_move_time * 0.6
                 ),
                 0.8
@@ -580,21 +581,21 @@ class LwsTransferTask(Node):
 
         return True
 
-    def execute_transfer_cycle(self, cycle, wp, pick='a', place='b'):
-        # 当前轮次的起点和终点由主循环传入，可执行 A→B 或 B→A
-        if not self.prepare_transfer(cycle, wp):
+    def execute_transfer_cycle(self, cycle, joint_waypoints, pick='a', place='b'):#把前面的所有动作贯穿起来
+        # 每轮的起点和终点由主循环指定，因此同一流程可双向复用
+        if not self.prepare_transfer(cycle, joint_waypoints):
             return False
 
-        if not self.pick_object(cycle, wp, pick):
+        if not self.pick_object(cycle, joint_waypoints, pick):
             return False
 
-        if not self.place_object(cycle, wp, place):
+        if not self.place_object(cycle, joint_waypoints, place):
             return False
 
         if not self.run_transfer_step(
             cycle,
             '返回初始姿态',
-            lambda: self.move_arm(wp['home']),
+            lambda: self.move_arm(joint_waypoints['home']),
             0.8
         ):
             return False

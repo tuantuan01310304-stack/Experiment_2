@@ -1,0 +1,54 @@
+# Final version parameters for the fixed-point pick-and-place simulation.
+# The values are mapped from the validated parameters used by the original task.
+
+final_grasp_task:
+  ros__parameters:
+    use_sim_time: true
+
+    # Robot base pose in the Gazebo world.
+    base_pose_xyz: [0.0, 0.0, 0.75]
+
+    # Pickup and drop-off positions in the world frame.
+    pickup_position: [0.10, 0.02, 0.7635]
+    dropoff_position: [0.07, -0.08, 0.7635]
+
+    # Height used for safe approach and retreat.
+    approach_height: 0.065
+
+    # Distance from the gripper base reference to the effective tool center.
+    tool_tip_offset: 0.063
+
+    # Gripper positions in radians.
+    gripper_release_position: 0.0
+    gripper_hold_position: -0.44
+
+    # Motion timing in seconds.
+    arm_motion_time: 4.5
+    gripper_motion_time: 1.2
+
+    # Number of complete transfer cycles.
+    task_repeat_limit: 5
+
+    # Output directory for trajectory, result and error logs.
+    log_dir: "/home/nvidia/lws/grasp_logs"
+
+    # Gazebo world used by the simulation.
+    world_name: "grasp_world"
+
+    # Use physical contact/friction instead of artificial attachment.
+    sim_attach: false
+
+    # Use Gazebo ground truth for simulation validation.
+    sim_check: true
+
+    # Optional task modes.
+    alternate_direction: false
+    use_taught_joints: false
+
+    # Optional taught joint configurations in degrees.
+    pickup_joints_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    dropoff_joints_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # Optional lift-angle settings.
+    lift_angle_deg: 25.0
+    drop_lift_angle_deg: 1.5
